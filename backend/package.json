@@ -14,7 +14,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint src --ext .ts",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "db:mock": "tsx prisma/mock-seed.ts",
+    "db:reset": "prisma migrate reset --force && tsx prisma/seed.ts && tsx prisma/mock-seed.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.9.0",
