@@ -1,0 +1,439 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// TENANT & THEME
+// ─────────────────────────────────────────────
+
+model Tenant {
+  id          String   @id @default(uuid())
+  name        String
+  slug        String   @unique // "msb", "mbb", "shb"
+  logoUrl     String?
+  themeConfig Json     @default("{}") // colors, fonts, game skins
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users      User[]
+  campaigns  Campaign[]
+  auditLogs  AuditLog[]
+  featureFlags TenantFeatureFlag[]
+
+  @@map("tenants")
+}
+
+model TenantFeatureFlag {
+  id       String  @id @default(uuid())
+  tenantId String
+  flag     String  // "LUCKY_BOX", "LUCKY_DRAW", "MEGA_PRIZE"
+  enabled  Boolean @default(true)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, flag])
+  @@map("tenant_feature_flags")
+}
+
+// ─────────────────────────────────────────────
+// USERS & AUTH
+// ─────────────────────────────────────────────
+
+enum UserRole {
+  SUPER_ADMIN
+  BANK_ADMIN
+  MARKETING_MANAGER
+  MARKETING_DIRECTOR
+  GAME_OPS
+  REPORT_VIEWER
+  CUSTOMER
+}
+
+model User {
+  id           String    @id @default(uuid())
+  tenantId     String?   // null = SUPER_ADMIN
+  cif          String?   // bank customer ID (customers only)
+  phone        String?
+  email        String?
+  passwordHash String?
+  role         UserRole  @default(CUSTOMER)
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  tenant              Tenant?               @relation(fields: [tenantId], references: [id])
+  refreshTokens       RefreshToken[]
+  customerTurns       CustomerTurn[]
+  customerPlays       CustomerPlay[]
+  campaignsCreated    Campaign[]            @relation("CampaignCreator")
+  campaignsApproved   Campaign[]            @relation("CampaignApprover")
+  rewardDisbursements RewardDisbursement[]
+  auditLogs           AuditLog[]
+
+  @@unique([tenantId, cif])
+  @@unique([tenantId, email])
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  revokedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("refresh_tokens")
+}
+
+// ─────────────────────────────────────────────
+// CAMPAIGNS
+// ─────────────────────────────────────────────
+
+enum CampaignStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  ACTIVE
+  PAUSED
+  ENDED
+  CANCELLED
+}
+
+enum GameType {
+  LUCKY_BOX    // real-time random box open
+  LUCKY_DRAW   // scheduled lottery draw
+}
+
+model Campaign {
+  id              String         @id @default(uuid())
+  tenantId        String
+  name            String
+  description     String?
+  gameType        GameType
+  status          CampaignStatus @default(DRAFT)
+  budgetTotal     Decimal        @db.Decimal(18, 2)
+  budgetSpent     Decimal        @db.Decimal(18, 2) @default(0)
+  startAt         DateTime
+  endAt           DateTime
+  maxTurnsPerDay  Int?           // per customer per day
+  maxTurnsTotal   Int?           // per customer total
+  createdBy       String
+  approvedBy      String?
+  approvedAt      DateTime?
+  rejectionNote   String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  tenant         Tenant          @relation(fields: [tenantId], references: [id])
+  creator        User            @relation("CampaignCreator", fields: [createdBy], references: [id])
+  approver       User?           @relation("CampaignApprover", fields: [approvedBy], references: [id])
+  gameConfig     GameConfig?
+  prizePools     PrizePool[]
+  earnRules      EarnRule[]
+  eligibilityConfig EligibilityConfig?
+  customerTurns  CustomerTurn[]
+  customerPlays  CustomerPlay[]
+  eligibleCustomers EligibleCustomer[]
+  draws          Draw[]
+  budgetAllocations BudgetAllocation[]
+
+  @@map("campaigns")
+}
+
+// ─────────────────────────────────────────────
+// GAME CONFIG
+// ─────────────────────────────────────────────
+
+model GameConfig {
+  id         String   @id @default(uuid())
+  campaignId String   @unique
+  config     Json     // game-specific: animation, skin, sound, reveal duration, etc.
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  campaign Campaign @relation(fields: [campaignId], references: [id])
+
+  @@map("game_configs")
+}
+
+// ─────────────────────────────────────────────
+// EARN RULES (transactions → turns)
+// ─────────────────────────────────────────────
+
+enum ProductType {
+  FD          // Fixed Deposit
+  CCTG        // Certificate of Deposit
+  M_SINH_LOI  // M-Sinh lời (savings)
+  USL         // Unsecured loan
+  CREDIT_CARD
+  QR_PAYMENT
+  TRANSFER
+  NEW_ACCOUNT
+  APP_INSTALL
+}
+
+model EarnRule {
+  id              String      @id @default(uuid())
+  campaignId      String
+  productType     ProductType
+  minAmount       Decimal?    @db.Decimal(18, 2)
+  turnsPerUnit    Int         @default(1)
+  unitAmount      Decimal?    @db.Decimal(18, 2) // e.g. 50M per 4 turns
+  maxTurnsPerMonth Int?
+  isActive        Boolean     @default(true)
+  createdAt       DateTime    @default(now())
+
+  campaign Campaign @relation(fields: [campaignId], references: [id])
+
+  @@map("earn_rules")
+}
+
+// ─────────────────────────────────────────────
+// PRIZE POOLS
+// ─────────────────────────────────────────────
+
+enum PrizeTier {
+  MEGA      // end-of-campaign grand prize
+  MONTHLY   // end-of-month draw prize
+  DAILY     // real-time open prize
+}
+
+enum PrizeType {
+  CASH            // direct account credit
+  VOUCHER         // voucher code
+  LOYALTY_POINTS  // loyalty system points
+  PHYSICAL        // car, motorbike, etc.
+  PRETTY_NUMBER   // TKSĐ - vanity phone/account number
+  MFEST_TICKET    // event ticket
+}
+
+model PrizePool {
+  id           String     @id @default(uuid())
+  campaignId   String
+  tier         PrizeTier
+  prizeType    PrizeType
+  name         String
+  valueVnd     Decimal    @db.Decimal(18, 2)
+  totalQty     Int
+  remainingQty Int
+  weight       Int        @default(100) // relative weight for RNG
+  isActive     Boolean    @default(true)
+  injectedAt   DateTime?  // when game ops added to active pool
+  injectedBy   String?    // user id of game ops
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  campaign      Campaign       @relation(fields: [campaignId], references: [id])
+  customerPlays CustomerPlay[]
+
+  @@map("prize_pools")
+}
+
+// ─────────────────────────────────────────────
+// ELIGIBILITY
+// ─────────────────────────────────────────────
+
+enum EligibilityMode {
+  API_RULE    // call bank API + rule engine
+  CIF_UPLOAD  // static excel upload
+  HYBRID      // union of both
+}
+
+model EligibilityConfig {
+  id         String          @id @default(uuid())
+  campaignId String          @unique
+  mode       EligibilityMode @default(API_RULE)
+  apiRules   Json?           // JSON rule DSL evaluated against customer API response
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+
+  campaign          Campaign           @relation(fields: [campaignId], references: [id])
+  eligibleCustomers EligibleCustomer[]
+
+  @@map("eligibility_configs")
+}
+
+model EligibleCustomer {
+  id                  String   @id @default(uuid())
+  campaignId          String
+  eligibilityConfigId String
+  customerCif         String
+  source              String   // "API" | "UPLOAD"
+  uploadBatchId       String?
+  createdAt           DateTime @default(now())
+
+  campaign          Campaign          @relation(fields: [campaignId], references: [id])
+  eligibilityConfig EligibilityConfig @relation(fields: [eligibilityConfigId], references: [id])
+
+  @@unique([campaignId, customerCif])
+  @@map("eligible_customers")
+}
+
+// ─────────────────────────────────────────────
+// TURNS & PLAYS
+// ─────────────────────────────────────────────
+
+enum TurnStatus {
+  AVAILABLE
+  USED
+  EXPIRED
+}
+
+model CustomerTurn {
+  id           String     @id @default(uuid())
+  campaignId   String
+  customerId   String
+  sourceTxId   String?    // bank transaction ID that triggered this turn
+  productType  ProductType?
+  qty          Int        @default(1)
+  status       TurnStatus @default(AVAILABLE)
+  expiresAt    DateTime?
+  createdAt    DateTime   @default(now())
+  usedAt       DateTime?
+
+  campaign     Campaign      @relation(fields: [campaignId], references: [id])
+  customer     User          @relation(fields: [customerId], references: [id])
+  play         CustomerPlay?
+
+  @@index([campaignId, customerId, status])
+  @@map("customer_turns")
+}
+
+model CustomerPlay {
+  id           String    @id @default(uuid())
+  campaignId   String
+  customerId   String
+  turnId       String    @unique
+  prizePoolId  String?
+  rngSeed      String    // hex-encoded for auditability
+  isWinner     Boolean   @default(false)
+  drawCode     String?   // for LUCKY_DRAW: the lottery code
+  playedAt     DateTime  @default(now())
+
+  campaign     Campaign     @relation(fields: [campaignId], references: [id])
+  customer     User         @relation(fields: [customerId], references: [id])
+  turn         CustomerTurn @relation(fields: [turnId], references: [id])
+  prizePool    PrizePool?   @relation(fields: [prizePoolId], references: [id])
+  disbursement RewardDisbursement?
+
+  @@index([campaignId, customerId])
+  @@map("customer_plays")
+}
+
+// ─────────────────────────────────────────────
+// DRAWS (LUCKY_DRAW scheduler)
+// ─────────────────────────────────────────────
+
+enum DrawStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+model Draw {
+  id          String     @id @default(uuid())
+  campaignId  String
+  tier        PrizeTier  // MONTHLY or MEGA
+  periodStart DateTime
+  periodEnd   DateTime
+  status      DrawStatus @default(SCHEDULED)
+  scheduledAt DateTime
+  executedAt  DateTime?
+  resultJson  Json?      // winner codes + prize mapping
+  livestreamUrl String?
+  createdAt   DateTime   @default(now())
+
+  campaign Campaign @relation(fields: [campaignId], references: [id])
+
+  @@map("draws")
+}
+
+// ─────────────────────────────────────────────
+// REWARDS & BUDGET
+// ─────────────────────────────────────────────
+
+enum DisbursementStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  REVERSED
+}
+
+model RewardDisbursement {
+  id          String             @id @default(uuid())
+  playId      String             @unique
+  customerId  String
+  prizeType   PrizeType
+  valueVnd    Decimal            @db.Decimal(18, 2)
+  status      DisbursementStatus @default(PENDING)
+  voucherCode String?
+  txRef       String?            // bank transfer reference
+  failReason  String?
+  attempts    Int                @default(0)
+  disbursedAt DateTime?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  play     CustomerPlay @relation(fields: [playId], references: [id])
+  customer User         @relation(fields: [customerId], references: [id])
+
+  @@map("reward_disbursements")
+}
+
+enum BudgetSource {
+  CARD_TEAM
+  LOYALTY_TEAM
+  MARKETING_TEAM
+  OTHER
+}
+
+model BudgetAllocation {
+  id         String       @id @default(uuid())
+  campaignId String
+  source     BudgetSource
+  amount     Decimal      @db.Decimal(18, 2)
+  note       String?
+  allocatedBy String
+  createdAt  DateTime     @default(now())
+
+  campaign Campaign @relation(fields: [campaignId], references: [id])
+
+  @@map("budget_allocations")
+}
+
+// ─────────────────────────────────────────────
+// AUDIT LOG (append-only)
+// ─────────────────────────────────────────────
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  tenantId  String?
+  actorId   String?
+  action    String   // "campaign.created", "prize.injected", "play.executed"
+  entity    String   // table name
+  entityId  String?
+  before    Json?
+  after     Json?
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  tenant Tenant? @relation(fields: [tenantId], references: [id])
+  actor  User?   @relation(fields: [actorId], references: [id])
+
+  @@index([tenantId, createdAt])
+  @@index([entity, entityId])
+  @@map("audit_logs")
+}
