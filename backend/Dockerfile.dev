@@ -2,11 +2,14 @@ FROM node:20-alpine
 
 WORKDIR /app
 
+# Install deps first (cached layer)
 COPY package*.json ./
 RUN npm install
 
+# Copy source
 COPY . .
 
 EXPOSE 4000
 
-CMD ["npm", "run", "dev"]
+# Default: run migration + seed + dev server
+CMD sh -c "npx prisma migrate deploy 2>/dev/null || npx prisma db push --accept-data-loss && npx tsx prisma/seed.ts && npx tsx prisma/mock-seed.ts && npm run dev"

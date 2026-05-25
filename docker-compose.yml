@@ -2,7 +2,7 @@ version: '3.9'
 
 services:
   postgres:
-    image: timescale/timescaledb:latest-pg16
+    image: postgres:16-alpine
     container_name: bgp-postgres
     environment:
       POSTGRES_USER: bgp
@@ -12,12 +12,12 @@ services:
       - '5432:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./backend/scripts/init-rls.sql:/docker-entrypoint-initdb.d/01-rls.sql
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U bgp']
+      test: ['CMD-SHELL', 'pg_isready -U bgp -d bank_game_platform']
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 15
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
@@ -31,7 +31,8 @@ services:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
+    restart: unless-stopped
 
   api:
     build:
@@ -48,15 +49,16 @@ services:
       PORT: 4000
       DATABASE_URL: postgresql://bgp:bgp_dev_secret@postgres:5432/bank_game_platform
       REDIS_URL: redis://redis:6379
-      JWT_ACCESS_SECRET: dev_access_secret_change_in_prod_minimum_32_chars
-      JWT_REFRESH_SECRET: dev_refresh_secret_change_in_prod_minimum_32_chars
-      CORS_ORIGINS: http://localhost:3000,http://localhost:3001
+      JWT_ACCESS_SECRET: local_dev_access_secret_min_32_chars_ok
+      JWT_REFRESH_SECRET: local_dev_refresh_secret_min_32_chars_ok
+      CORS_ORIGINS: http://localhost:3000,http://localhost:5173
     ports:
       - '4000:4000'
     volumes:
       - ./backend/src:/app/src
       - ./backend/prisma:/app/prisma
-    command: sh -c "npx prisma migrate dev --name init && npx tsx prisma/seed.ts && npm run dev"
+      - /app/node_modules
+    restart: unless-stopped
 
   worker:
     build:
@@ -72,33 +74,22 @@ services:
       NODE_ENV: development
       DATABASE_URL: postgresql://bgp:bgp_dev_secret@postgres:5432/bank_game_platform
       REDIS_URL: redis://redis:6379
-      JWT_ACCESS_SECRET: dev_access_secret_change_in_prod_minimum_32_chars
-      JWT_REFRESH_SECRET: dev_refresh_secret_change_in_prod_minimum_32_chars
+      JWT_ACCESS_SECRET: local_dev_access_secret_min_32_chars_ok
+      JWT_REFRESH_SECRET: local_dev_refresh_secret_min_32_chars_ok
     volumes:
       - ./backend/src:/app/src
+      - /app/node_modules
     command: npx tsx src/worker.ts
-
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile.dev
-    container_name: bgp-frontend
-    environment:
-      VITE_API_URL: http://localhost:4000/api/v1
-    ports:
-      - '3000:3000'
-    volumes:
-      - ./frontend/src:/app/src
-    depends_on:
-      - api
+    restart: unless-stopped
 
   adminer:
-    image: adminer
+    image: adminer:latest
     container_name: bgp-adminer
     ports:
       - '8080:8080'
     depends_on:
       - postgres
+    restart: unless-stopped
 
 volumes:
   postgres_data:
